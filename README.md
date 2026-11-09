@@ -10,6 +10,8 @@ A multi-agent AI project in which several Pacman agents share one maze, flee fro
 
 The project is written in pure Python 3.10+. Only the optional parts need extra packages (`matplotlib` for charts, `tkinter` for the GUI).
 
+> **Diagrams.** The figures below are written in [Mermaid](https://mermaid.js.org), which GitHub, GitLab, VS Code, Typora and PyCharm (Markdown preview) render automatically. PNG and SVG copies for slides or reports are in the `diagrams/` folder.
+
 ---
 
 ## 1. Game concept
@@ -38,6 +40,49 @@ This creates the central tension of the project: spending coins on survival tool
 - A newly spawned or respawned Pacman has 3 turns of grace shielding.
 - Coins respawn at random with probability 0.25 per turn, so the economy never dries up.
 
+### Turn loop
+
+Every turn of the engine follows the same sequence.
+
+```mermaid
+flowchart TD
+    T0(["Start of turn t"])
+    Q0{"Auction turn?<br/>(every 50 turns)"}
+    AU["Auction<br/>all living agents bid"]
+    AC["Each living Pacman<br/>(random order) perceives<br/>and chooses a move"]
+    MV["Move validated<br/>(1 step, no walls)<br/>collect coin / item"]
+    C1["Resolve collisions<br/>shield: safe<br/>power: eat ghost<br/>otherwise: lose a life"]
+    GH["Ghosts move<br/>(chase or flee)"]
+    C2["Resolve collisions<br/>again"]
+    UP["Update timers and<br/>survival counter<br/>maybe respawn a coin"]
+    Q1{"Game over?<br/>(turn limit or<br/>all Pacmans dead)"}
+    SC(["Final score =<br/>wallet + survival + lives"])
+    T0 --> Q0
+    Q0 -->|"yes"| AU
+    Q0 -->|"no"| AC
+    AU --> AC
+    AC --> MV
+    MV --> C1
+    C1 --> GH
+    GH --> C2
+    C2 --> UP
+    UP --> Q1
+    Q1 -->|"no: next turn"| T0
+    Q1 -->|"yes"| SC
+    classDef core fill:#eceef4,stroke:#8a90a6,color:#222,stroke-width:1.5px
+    classDef mA fill:#cfe3ff,stroke:#4a86d6,color:#222,stroke-width:1.5px
+    classDef mB fill:#ffe0b8,stroke:#e08a1e,color:#222,stroke-width:1.5px
+    classDef term fill:#dddddd,stroke:#777777,color:#222,stroke-width:1.5px
+    classDef test fill:#f2f2f7,stroke:#8a90a6,color:#222,stroke-width:1.5px
+    class MV,C1,GH,C2,UP core
+    class AC mA
+    class AU mB
+    class T0,SC term
+    class Q0,Q1 test
+```
+
+*Figure 1. Game turn loop.* (image version: `diagrams/01_turn_loop.png`)
+
 ---
 
 ## 2. Architecture
@@ -58,6 +103,54 @@ pacman_mad/
 └── tests/             142 unit tests (unittest)
 ```
 
+```mermaid
+flowchart TD
+    GAME["game.py<br/>game engine"]
+    AG["agents.py<br/>IntelligentAgent"]
+    PERS["personalities.py<br/>4 decision trees"]
+    MET["metrics.py<br/>recorder + snapshots"]
+    LOG["data/logs.csv<br/>models/tree.json"]
+    subgraph ENTRY["Entry points"]
+        MAIN["main.py<br/>basic tournament"]
+        GUI["gui.py<br/>Tkinter GUI"]
+        EXP["experiments.py<br/>charts + CSV"]
+        TRN["train_tree.py<br/>train + evaluate"]
+    end
+    subgraph MODS["AI modules"]
+        MA["search.py<br/>Module A<br/>BFS, A*, Minimax + Alpha-Beta"]
+        MB["auction.py<br/>Module B<br/>Vickrey / Dutch auctioneer"]
+        MC["decision_tree.py<br/>Module C<br/>ID3 from scratch"]
+    end
+    MAIN --> GAME
+    GUI -->|"live game"| GAME
+    GUI -->|"snapshots / replay"| MET
+    EXP -->|"rosters"| PERS
+    EXP -->|"records games"| MET
+    MET -->|"wraps"| GAME
+    PERS -->|"builds agents"| AG
+    PERS -->|"trains trees"| MC
+    GAME -->|"act() / bid()"| AG
+    GAME -->|"run auction"| MB
+    AG -->|"navigation"| MA
+    AG -->|"classify state"| MC
+    TRN -->|"writes"| LOG
+    LOG -->|"loaded by"| MC
+    classDef core fill:#eceef4,stroke:#8a90a6,color:#222,stroke-width:1.5px
+    classDef data fill:#fff6c8,stroke:#c9a800,color:#222,stroke-width:1.5px
+    classDef mA fill:#cfe3ff,stroke:#4a86d6,color:#222,stroke-width:1.5px
+    classDef mB fill:#ffe0b8,stroke:#e08a1e,color:#222,stroke-width:1.5px
+    classDef mC fill:#d3f2d0,stroke:#4fa84a,color:#222,stroke-width:1.5px
+    classDef ui fill:#e6e0fa,stroke:#7b68c8,color:#222,stroke-width:1.5px
+    class GAME,AG,PERS,MET core
+    class LOG data
+    class MA mA
+    class MB mB
+    class MC mC
+    class MAIN,GUI,EXP,TRN ui
+```
+
+*Figure 2. System architecture: entry points, core files and the three AI modules.* (image version: `diagrams/02_architecture.png`)
+
 ### Module A: navigation and search (`search.py`)
 
 - **BFS** finds the nearest coin or the nearest unexplored cell, optionally avoiding cells next to ghosts.
@@ -72,6 +165,66 @@ An `Auctioneer` collects one sealed bid per agent and decides the winner and the
 - **Dutch:** the price starts high and descends. The first agent whose maximum price is reached wins and pays the current price.
 
 Ties are broken randomly. Bids are always clipped to the bidder's wallet, so a wallet can never go negative.
+
+#### Auction flow
+
+From the agent's bid to the winner picking up the item:
+
+```mermaid
+flowchart TD
+    S0(["Auction turn<br/>item drawn at random"])
+    GO(["Winner walks there with A*<br/>and gets the effect"])
+    subgraph PER["Per agent"]
+        FE["Build features<br/>ghost distance, life,<br/>coins, item type"]
+        TR["ID3 returns<br/>class A / B / C"]
+        CQ{"Class?"}
+        BA["A: aggressive<br/>bid = value x mult_a"]
+        BB["B: conservative<br/>bid = min(value x mult_b,<br/>half of wallet)"]
+        BC["C: ignore auction<br/>bid = 0"]
+        CL["Clip bid<br/>to wallet"]
+    end
+    subgraph AUC["Auctioneer"]
+        CO["Auctioneer<br/>collects all bids"]
+        TY{"Auction type?"}
+        VI["Vickrey<br/>highest bid wins and pays<br/>the second-highest bid<br/>(reserve if alone)"]
+        DU["Dutch<br/>price falls from 60 in steps of 2;<br/>first agent whose max price<br/>is reached wins"]
+        WI["Winner pays;<br/>item appears 4 to 12<br/>steps away"]
+    end
+    S0 --> FE
+    FE --> TR
+    TR --> CQ
+    CQ -->|"A"| BA
+    CQ -->|"B"| BB
+    CQ -->|"C"| BC
+    BA --> CL
+    BB --> CL
+    BC --> CL
+    CL --> CO
+    CO --> TY
+    TY -->|"Vickrey"| VI
+    TY -->|"Dutch"| DU
+    VI --> WI
+    DU --> WI
+    WI --> GO
+    classDef core fill:#eceef4,stroke:#8a90a6,color:#222,stroke-width:1.5px
+    classDef leafA fill:#f6b9a6,stroke:#e4572e,color:#222,stroke-width:1.5px
+    classDef leafB fill:#fbe0a0,stroke:#f3a712,color:#222,stroke-width:1.5px
+    classDef leafC fill:#a9e3df,stroke:#29a19c,color:#222,stroke-width:1.5px
+    classDef mB fill:#ffe0b8,stroke:#e08a1e,color:#222,stroke-width:1.5px
+    classDef mC fill:#d3f2d0,stroke:#4fa84a,color:#222,stroke-width:1.5px
+    classDef term fill:#dddddd,stroke:#777777,color:#222,stroke-width:1.5px
+    classDef test fill:#f2f2f7,stroke:#8a90a6,color:#222,stroke-width:1.5px
+    class FE,CL,WI core
+    class BA leafA
+    class BB leafB
+    class BC leafC
+    class CO,VI,DU mB
+    class TR mC
+    class S0,GO term
+    class CQ,TY test
+```
+
+*Figure 3. How an auction is resolved.* (image version: `diagrams/03_auction_flow.png`)
 
 ### Module C: decision tree (`decision_tree.py`)
 
@@ -92,6 +245,53 @@ and returns one of three strategies:
 | **B** | Bid conservatively | `min(value × mult_b, 50% of wallet)` |
 | **C** | Ignore the auction and flee | 0 |
 
+#### Example tree
+
+The trained *Equilibrat* tree, with redundant splits merged (the decisions are identical to the full ID3 tree):
+
+```mermaid
+flowchart TD
+    R{"Ghost<br/>distance?"}
+    N1{"Item<br/>type?"}
+    N2{"Life?"}
+    N3{"Coins?"}
+    F1{"Item<br/>type?"}
+    F2{"Coins?"}
+    F3{"Life?"}
+    L1["C<br/>ignore + flee"]
+    L2["C<br/>ignore + flee"]
+    L3["C<br/>ignore + flee"]
+    L4["A<br/>bid aggressively"]
+    L5["C<br/>ignore + flee"]
+    L6["B<br/>bid carefully"]
+    L7["B<br/>bid carefully"]
+    L8["A<br/>bid aggressively"]
+    R -->|"near (4 or less)"| N1
+    R -->|"far"| F1
+    N1 -->|"points"| L1
+    N1 -->|"survival"| N2
+    N2 -->|"high"| L2
+    N2 -->|"low"| N3
+    N3 -->|"poor"| L3
+    N3 -->|"rich"| L4
+    F1 -->|"points"| F2
+    F1 -->|"survival"| F3
+    F2 -->|"poor"| L5
+    F2 -->|"rich"| L6
+    F3 -->|"high"| L7
+    F3 -->|"low"| L8
+    classDef leafA fill:#f6b9a6,stroke:#e4572e,color:#222,stroke-width:1.5px
+    classDef leafB fill:#fbe0a0,stroke:#f3a712,color:#222,stroke-width:1.5px
+    classDef leafC fill:#a9e3df,stroke:#29a19c,color:#222,stroke-width:1.5px
+    classDef test fill:#f2f2f7,stroke:#8a90a6,color:#222,stroke-width:1.5px
+    class L4,L8 leafA
+    class L6,L7 leafB
+    class L1,L2,L3,L5 leafC
+    class R,N1,N2,N3,F1,F2,F3 test
+```
+
+*Figure 4. Decision tree of the Equilibrat personality.* (image version: `diagrams/04_decision_tree.png`)
+
 ---
 
 ## 3. Agent life cycle
@@ -107,9 +307,89 @@ On every turn, an `IntelligentAgent` does the following:
    3. There is a won item waiting: go to it with **A\***.
    4. Otherwise: **BFS** to the nearest visible coin, or explore unvisited cells.
 
+```mermaid
+flowchart TD
+    P(["Perceive view<br/>position, ghosts, visible coins,<br/>items, wallet, lives"])
+    F["Ghost distance (BFS)<br/>build 4 features"]
+    CL["Classify state<br/>with ID3: class A / B / C"]
+    Q1{"Vulnerable (no shield/power)<br/>and ghost closer than 3?<br/>(5 if class C)"}
+    M["Minimax + Alpha-Beta<br/>flee"]
+    Q2{"Power Pellet active<br/>and ghost nearby?"}
+    H["A* hunt<br/>nearest ghost"]
+    Q3{"Won item<br/>pending?"}
+    I["A* to the item<br/>avoiding danger zones"]
+    Q4{"Visible coin?"}
+    BC["BFS to nearest coin<br/>(avoid cells next to ghosts)"]
+    EX["BFS explore<br/>nearest unvisited cell"]
+    MV(["Move"])
+    P --> F
+    F --> CL
+    CL --> Q1
+    Q1 -->|"yes"| M
+    Q1 -->|"no"| Q2
+    Q2 -->|"yes"| H
+    Q2 -->|"no"| Q3
+    Q3 -->|"yes"| I
+    Q3 -->|"no"| Q4
+    Q4 -->|"yes"| BC
+    Q4 -->|"no"| EX
+    M --> MV
+    H --> MV
+    I --> MV
+    BC --> MV
+    EX --> MV
+    classDef core fill:#eceef4,stroke:#8a90a6,color:#222,stroke-width:1.5px
+    classDef mA fill:#cfe3ff,stroke:#4a86d6,color:#222,stroke-width:1.5px
+    classDef mC fill:#d3f2d0,stroke:#4fa84a,color:#222,stroke-width:1.5px
+    classDef term fill:#dddddd,stroke:#777777,color:#222,stroke-width:1.5px
+    classDef test fill:#f2f2f7,stroke:#8a90a6,color:#222,stroke-width:1.5px
+    class F core
+    class M,H,I,BC,EX mA
+    class CL mC
+    class P,MV term
+    class Q1,Q2,Q3,Q4 test
+```
+
+*Figure 5. Decision cycle of an `IntelligentAgent` on every turn.* (image version: `diagrams/05_agent_cycle.png`)
+
 ---
 
 ## 4. Experiments
+
+The experiments share one pipeline, from training data to charts and replays:
+
+```mermaid
+flowchart LR
+    LG["Synthetic logs<br/>(policy + noise)"]
+    TR["ID3 training<br/>4 personalities"]
+    AG["Agents<br/>tree + A* + Minimax"]
+    EXPS["Experiments<br/>1 personalities<br/>2 spending vs score<br/>3 escape x buying"]
+    GM["Seeded games<br/>(200 per experiment)"]
+    RC["Recorder<br/>per-turn data"]
+    CSV["CSV results"]
+    PNG["Charts (PNG)"]
+    JS["Recording (JSON)"]
+    GU["GUI replay"]
+    LG --> TR
+    TR --> AG
+    AG --> GM
+    EXPS -->|"rosters"| GM
+    GM --> RC
+    RC --> CSV
+    RC --> PNG
+    RC --> JS
+    JS --> GU
+    classDef core fill:#eceef4,stroke:#8a90a6,color:#222,stroke-width:1.5px
+    classDef data fill:#fff6c8,stroke:#c9a800,color:#222,stroke-width:1.5px
+    classDef mC fill:#d3f2d0,stroke:#4fa84a,color:#222,stroke-width:1.5px
+    classDef ui fill:#e6e0fa,stroke:#7b68c8,color:#222,stroke-width:1.5px
+    class AG,GM,RC core
+    class LG,CSV,PNG,JS data
+    class TR mC
+    class EXPS,GU ui
+```
+
+*Figure 6. Experiment pipeline.* (image version: `diagrams/06_experiment_pipeline.png`)
 
 ### 4.1 Personalities
 
